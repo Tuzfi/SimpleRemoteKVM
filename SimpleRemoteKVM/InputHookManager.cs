@@ -53,9 +53,9 @@ namespace SimpleRemoteKVM
         private int _remoteCursorX = 0;
         private int _remoteCursorY = 0;
         private Point _lastMousePt = Point.Empty;
-        private Point _ignoreNextMovePoint = Point.Empty;
+        private volatile bool _isRecentering = false;
         private long _lastSwitchTick = 0;
-        private const long SWITCH_COOLDOWN_TICKS = 3000000; // 300 ms de debounce para evitar trepidação
+        private const long SWITCH_COOLDOWN_TICKS = 4000000; // 400 ms de debounce para evitar trepidação
 
         public event Action<DATA> OnDataToSend;
         public event Action<bool> OnControlModeChanged;
@@ -133,6 +133,12 @@ namespace SimpleRemoteKVM
 
         public void ToggleRemoteMode()
         {
+            if (IsBeingControlledByRemote)
+            {
+                SetBeingControlledByRemote(false);
+                SendSwitchPacket(false);
+                return;
+            }
             SetControlMode(!IsRemoteActive, true);
         }
 
@@ -151,15 +157,12 @@ namespace SimpleRemoteKVM
                     _remoteCursorY = RemoteScreenHeight / 2;
                 }
 
-                NativeMethods.POINT cur;
-                if (NativeMethods.GetCursorPos(out cur))
-                {
-                    _lastMousePt = new Point(cur.x, cur.y);
-                }
-                else
-                {
-                    _lastMousePt = new Point(Screen.PrimaryScreen.Bounds.Width / 2, Screen.PrimaryScreen.Bounds.Height / 2);
-                }
+                // Centraliza o cursor local de forma controlada para dar 360 graus de movimento livre
+                Rectangle localBounds = Screen.PrimaryScreen.Bounds;
+                Point center = new Point(localBounds.Width / 2, localBounds.Height / 2);
+                _isRecentering = true;
+                _lastMousePt = center;
+                NativeMethods.SetCursorPos(center.X, center.Y);
 
                 // Envia pacote inicial de movimento para posicionar o cursor no outro PC
                 SendMouseData(_remoteCursorX, _remoteCursorY, 0, (int)NativeMethods.MOUSEEVENTF.MOVE);
@@ -187,7 +190,7 @@ namespace SimpleRemoteKVM
             }
         }
 
-        private void SendSwitchPacket(bool isRemote)
+        public void SendSwitchPacket(bool isRemote)
         {
             DATA switchPacket = new DATA
             {
@@ -214,10 +217,17 @@ namespace SimpleRemoteKVM
                 return NativeMethods.CallNextHookEx(_mouseHookId, nCode, wParam, lParam);
             }
 
+            // CRÍTICO: Se esta máquina está sendo controlada pelo outro computador (modo passivo),
+            // NÃO intercepta, NÃO calcula deltas e NÃO cancela o controle! Deixa o Windows mover normalmente.
+            if (IsBeingControlledByRemote)
+            {
+                return NativeMethods.CallNextHookEx(_mouseHookId, nCode, wParam, lParam);
+            }
+
             NativeMethods.MouseLLHookStruct hookStruct = (NativeMethods.MouseLLHookStruct)
                 Marshal.PtrToStructure(lParam, typeof(NativeMethods.MouseLLHookStruct));
 
-            // Se o evento foi injetado sinteticamente por software (LLMHF_INJECTED = 1), não processa para evitar loops
+            // Se o evento foi injetado por software (LLMHF_INJECTED = 1), deixa passar
             if ((hookStruct.flags & 1) != 0)
             {
                 return NativeMethods.CallNextHookEx(_mouseHookId, nCode, wParam, lParam);
@@ -225,21 +235,12 @@ namespace SimpleRemoteKVM
 
             int msg = wParam.ToInt32();
 
-            // Se for o reposicionamento suave que nós mesmos acionamos para o centro da tela:
-            if (!_ignoreNextMovePoint.IsEmpty && hookStruct.pt.x == _ignoreNextMovePoint.X && hookStruct.pt.y == _ignoreNextMovePoint.Y)
+            // Se for o reposicionamento suave que nós mesmos acionamos para o centro:
+            if (_isRecentering)
             {
-                _ignoreNextMovePoint = Point.Empty;
+                _isRecentering = false;
                 _lastMousePt = new Point(hookStruct.pt.x, hookStruct.pt.y);
                 return (IntPtr)1; // Consome sem disparar deltas
-            }
-
-            // Se a máquina estiver sendo controlada remotamente e o usuário mexer no mouse físico local:
-            // Retoma o controle imediatamente para o usuário local (comportamento padrão MWB)
-            if (IsBeingControlledByRemote)
-            {
-                SetBeingControlledByRemote(false);
-                SendSwitchPacket(false);
-                return NativeMethods.CallNextHookEx(_mouseHookId, nCode, wParam, lParam);
             }
 
             Rectangle localBounds = Screen.PrimaryScreen.Bounds;
@@ -301,11 +302,10 @@ namespace SimpleRemoteKVM
 
                         _remoteCursorX = entryX;
                         _remoteCursorY = entryY;
-                        _lastMousePt = new Point(hookStruct.pt.x, hookStruct.pt.y);
 
                         SetControlMode(true, false);
 
-                        return (IntPtr)1; // Consome o evento para não clicar na borda da tela local
+                        return (IntPtr)1; // Consome para não clicar na borda da tela local
                     }
                 }
 
@@ -425,11 +425,11 @@ namespace SimpleRemoteKVM
 
                     // Se o mouse físico estiver muito próximo das bordas físicas locais,
                     // centraliza suavemente para que o usuário não fique sem espaço de movimento
-                    if (hookStruct.pt.x <= 15 || hookStruct.pt.x >= localW - 15 ||
-                        hookStruct.pt.y <= 15 || hookStruct.pt.y >= localH - 15)
+                    if (hookStruct.pt.x <= 20 || hookStruct.pt.x >= localW - 20 ||
+                        hookStruct.pt.y <= 20 || hookStruct.pt.y >= localH - 20)
                     {
                         Point center = new Point(localW / 2, localH / 2);
-                        _ignoreNextMovePoint = center;
+                        _isRecentering = true;
                         _lastMousePt = center;
                         NativeMethods.SetCursorPos(center.X, center.Y);
                     }
@@ -486,12 +486,15 @@ namespace SimpleRemoteKVM
                 bool isKeyUp = (msg == NativeMethods.WM_KEYUP || msg == NativeMethods.WM_SYSKEYUP);
                 int vk = hookStruct.vkCode;
 
-                // Se o PC estava sendo controlado e o usuário digitou localmente:
-                // Retoma o controle imediatamente para o usuário local
+                // Se o PC estava sendo controlado e o usuário apertou ScrollLock, retoma o controle intencionalmente
                 if (IsBeingControlledByRemote)
                 {
-                    SetBeingControlledByRemote(false);
-                    SendSwitchPacket(false);
+                    if (vk == ToggleVirtualKey && isKeyUp)
+                    {
+                        SetBeingControlledByRemote(false);
+                        SendSwitchPacket(false);
+                        return (IntPtr)1;
+                    }
                     return NativeMethods.CallNextHookEx(_keyboardHookId, nCode, wParam, lParam);
                 }
 
