@@ -1,0 +1,19 @@
+# Ghidra local analysis databases
+ghidra_project/
+*.rep/
+*.gpr
+
+# Binary dump / Proprietary target binaries
+bin/
+
+# Build artifacts
+*.pdb
+*.obj
+*.log
+
+# Windows & IDE artifacts
+.vs/
+[Dd]ebug/
+[Rr]elease/
+thumbs.db
+desktop.ini
