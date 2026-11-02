@@ -1,20 +1,22 @@
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Windows.Forms;
 
 namespace SimpleRemoteKVM
 {
     /// <summary>
     /// Handles TCP peer networking, socket configuration, frame serialization,
-    /// and heartbeat exchange.
+    /// heartbeat exchange, and asynchronous low-latency packet queueing.
     /// Replicates the socket options and buffering patterns extracted from
     /// MouseWithoutBorders.SocketStuff and MouseWithoutBorders.TcpServer.
     /// </summary>
     public class NetworkPeer : IDisposable
     {
-        public const int DEFAULT_PORT = 15200; // Alterado de 15100 para 15200 para evitar conflitos com o Mouse without Borders oficial
+        public const int DEFAULT_PORT = 15200; // Porta padrão 15200 (evita conflitos com Mouse without Borders 15100)
         public const int BUFFER_SIZE = 1024000; // 1 MB buffer extraído de Common.ShakeHand
 
         private TcpListener _listener;
@@ -22,7 +24,13 @@ namespace SimpleRemoteKVM
         private NetworkStream _stream;
         private Thread _listenThread;
         private Thread _readThread;
+        private Thread _sendThread;
         private Thread _heartbeatThread;
+
+        // Fila assíncrona desacoplada de alto desempenho (Producer-Consumer)
+        // Elimina qualquer atraso na thread do gancho do mouse (WH_MOUSE_LL)
+        private readonly ConcurrentQueue<DATA> _sendQueue = new ConcurrentQueue<DATA>();
+        private readonly AutoResetEvent _sendSignal = new AutoResetEvent(false);
 
         private volatile bool _isRunning = false;
         private bool _isDisposed = false;
@@ -38,6 +46,7 @@ namespace SimpleRemoteKVM
         public event Action<string> OnConnected;
         public event Action<string> OnDisconnected;
         public event Action<string> OnLog;
+        public event Action<int, int> OnRemoteResolutionReceived;
 
         private void Log(string message)
         {
@@ -68,7 +77,7 @@ namespace SimpleRemoteKVM
                 throw;
             }
 
-            Log(string.Format("[REDE] Servidor aguardando conexão em 0.0.0.0:{0}...", port));
+            Log(string.Format("[REDE] Servidor P2P aguardando conexão em 0.0.0.0:{0}...", port));
 
             _listenThread = new Thread(ListenLoop)
             {
@@ -100,18 +109,21 @@ namespace SimpleRemoteKVM
                     if (!success)
                     {
                         try { client.Close(); } catch { }
-                        throw new TimeoutException(string.Format("Tempo esgotado ao tentar conectar com {0}:{1}. O outro PC pode estar desligado, em outra rede Wi-Fi, com o Modo Servidor desativado ou bloqueado pelo Firewall.", remoteHost, port));
+                        throw new TimeoutException(string.Format("Tempo esgotado ao tentar conectar com {0}:{1}. O outro PC pode estar desligado, em outra rede Wi-Fi, com o aplicativo fechado ou bloqueado pelo Firewall.", remoteHost, port));
                     }
                     client.EndConnect(ar);
 
                     SetupClient(client);
 
-                    // Send initial handshake
+                    // Envia handshake inicial contendo as dimensões da tela local
+                    int localW = Screen.PrimaryScreen.Bounds.Width;
+                    int localH = Screen.PrimaryScreen.Bounds.Height;
                     DATA handshake = new DATA
                     {
                         Type = PackageType.handshake,
                         Id = 1,
-                        Timestamp = DateTime.UtcNow.Ticks
+                        Timestamp = DateTime.UtcNow.Ticks,
+                        Md = new MOUSEDATA { x = localW, y = localH }
                     };
                     SendPacket(handshake);
                 }
@@ -139,7 +151,7 @@ namespace SimpleRemoteKVM
                 while (_isRunning)
                 {
                     TcpClient client = _listener.AcceptTcpClient();
-                    Log("[NETWORK] Inbound connection accepted from: " + client.Client.RemoteEndPoint);
+                    Log("[REDE] Conexão recebida de: " + client.Client.RemoteEndPoint);
 
                     ApplyMwbSocketOptions(client.Client);
                     SetupClient(client);
@@ -151,7 +163,7 @@ namespace SimpleRemoteKVM
             }
             catch (Exception ex)
             {
-                Log("[NETWORK ERROR] Listener loop exception: " + ex.Message);
+                Log("[REDE] Exceção no listener: " + ex.Message);
             }
         }
 
@@ -184,26 +196,91 @@ namespace SimpleRemoteKVM
                 RemoteEndPointDescription = _client.Client.RemoteEndPoint.ToString();
             }
 
+            // Limpa fila residual
+            DATA discarded;
+            while (_sendQueue.TryDequeue(out discarded)) { }
+
             if (OnConnected != null)
             {
                 OnConnected(RemoteEndPointDescription);
             }
 
-            // Start reading thread
+            // Inicia thread de envio assíncrono ultrarrápido (prioridade acima do normal)
+            _sendThread = new Thread(SendLoop)
+            {
+                IsBackground = true,
+                Priority = ThreadPriority.AboveNormal,
+                Name = "KVM_FastPacketSender"
+            };
+            _sendThread.Start();
+
+            // Inicia thread de leitura contínua
             _readThread = new Thread(ReadLoop)
             {
                 IsBackground = true,
-                Name = "KVM_SocketReader"
+                Priority = ThreadPriority.AboveNormal,
+                Name = "KVM_FastSocketReader"
             };
             _readThread.Start();
 
-            // Start heartbeat thread
+            // Inicia thread de heartbeat (keep-alive)
             _heartbeatThread = new Thread(HeartbeatLoop)
             {
                 IsBackground = true,
                 Name = "KVM_Heartbeat"
             };
             _heartbeatThread.Start();
+        }
+
+        /// <summary>
+        /// Fila de envio desacoplada: retira pacotes da fila e escreve diretamente no socket.
+        /// Aplica coalescimento (coalescing) de pacotes de movimento de mouse caso ocorra
+        /// acúmulo na rede, garantindo que o ponteiro sempre acompanhe em tempo real
+        /// sem atrasos ou efeito "arrasto" de histórico!
+        /// </summary>
+        private void SendLoop()
+        {
+            try
+            {
+                while (_isRunning)
+                {
+                    _sendSignal.WaitOne(50);
+                    if (!_isRunning) break;
+                    if (!IsConnected || _stream == null) continue;
+
+                    DATA packet;
+                    while (_sendQueue.TryDequeue(out packet))
+                    {
+                        if (!IsConnected || _stream == null) break;
+
+                        // Se for um movimento puro de mouse e houver mais movimentos na fila,
+                        // descarta movimentos intermediários obsoletos e envia direto a coordenada mais recente!
+                        if (packet.Type == PackageType.mouse &&
+                            (packet.Md.dwFlags & ~(int)NativeMethods.MOUSEEVENTF.MOVE) == 0 &&
+                            packet.Md.wDelta == 0)
+                        {
+                            DATA nextPacket;
+                            while (_sendQueue.TryPeek(out nextPacket) &&
+                                   nextPacket.Type == PackageType.mouse &&
+                                   (nextPacket.Md.dwFlags & ~(int)NativeMethods.MOUSEEVENTF.MOVE) == 0 &&
+                                   nextPacket.Md.wDelta == 0)
+                            {
+                                _sendQueue.TryDequeue(out packet); // Atualiza para o mais recente
+                            }
+                        }
+
+                        byte[] bytes = packet.ToBytes();
+                        _stream.Write(bytes, 0, bytes.Length);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_isRunning && IsConnected)
+                {
+                    Log("[REDE] Exceção na fila de transmissão: " + ex.Message);
+                }
+            }
         }
 
         private void ReadLoop()
@@ -219,7 +296,7 @@ namespace SimpleRemoteKVM
                         int read = _stream.Read(buffer, totalRead, DATA.PACKET_SIZE - totalRead);
                         if (read == 0)
                         {
-                            throw new IOException("Remote peer closed the socket stream.");
+                            throw new IOException("O PC remoto encerrou a conexão de rede.");
                         }
                         totalRead += read;
                     }
@@ -239,22 +316,34 @@ namespace SimpleRemoteKVM
 
                     if (packet.Type == PackageType.handshake)
                     {
-                        Log("[HANDSHAKE] Handshake received from peer. Sending ACK...");
+                        Log("[HANDSHAKE] Handshake recebido do outro PC. Enviando confirmação ACK...");
+                        if (packet.Md.x > 0 && packet.Md.y > 0 && OnRemoteResolutionReceived != null)
+                        {
+                            OnRemoteResolutionReceived(packet.Md.x, packet.Md.y);
+                        }
+
+                        int localW = Screen.PrimaryScreen.Bounds.Width;
+                        int localH = Screen.PrimaryScreen.Bounds.Height;
                         DATA ack = new DATA
                         {
                             Type = PackageType.handshakeack,
                             Id = packet.Id + 1,
-                            Timestamp = DateTime.UtcNow.Ticks
+                            Timestamp = DateTime.UtcNow.Ticks,
+                            Md = new MOUSEDATA { x = localW, y = localH }
                         };
                         SendPacket(ack);
                     }
                     else if (packet.Type == PackageType.handshakeack)
                     {
-                        Log("[HANDSHAKE] Handshake ACK confirmed. Peer ready!");
+                        Log("[HANDSHAKE] Conexão confirmada! Ambos os PCs sincronizados.");
+                        if (packet.Md.x > 0 && packet.Md.y > 0 && OnRemoteResolutionReceived != null)
+                        {
+                            OnRemoteResolutionReceived(packet.Md.x, packet.Md.y);
+                        }
                     }
                     else if (packet.Type == PackageType.heartbeat)
                     {
-                        // Heartbeat keep-alive; no action required
+                        // Heartbeat keep-alive; sem ação necessária
                     }
                     else
                     {
@@ -269,7 +358,7 @@ namespace SimpleRemoteKVM
             {
                 if (_isRunning)
                 {
-                    Log("[NETWORK] Peer disconnected: " + ex.Message);
+                    Log("[REDE] Conexão encerrada: " + ex.Message);
                     if (OnDisconnected != null)
                     {
                         OnDisconnected(ex.Message);
@@ -289,7 +378,7 @@ namespace SimpleRemoteKVM
             {
                 while (_isRunning && IsConnected)
                 {
-                    Thread.Sleep(2000); // Send heartbeat every 2 seconds
+                    Thread.Sleep(2000); // Heartbeat a cada 2 segundos
 
                     DATA hb = new DATA
                     {
@@ -303,36 +392,20 @@ namespace SimpleRemoteKVM
             }
             catch
             {
-                // Heartbeat thread terminates on disconnect
+                // Heartbeat thread encerra na desconexão
             }
         }
 
+        /// <summary>
+        /// Enfileira o pacote para transmissão imediata na thread de envio assíncrona.
+        /// Retorna em microssegundos sem travar o gancho do mouse ou a interface gráfica.
+        /// </summary>
         public void SendPacket(DATA packet)
         {
-            if (!IsConnected || _stream == null) return;
+            if (!IsConnected) return;
 
-            try
-            {
-                /*
-                 * =========================================================================
-                 * TODO: [MWB Crypto Hook - Encryption]
-                 * In Microsoft Mouse without Borders, outgoing packets are encrypted here
-                 * using AES-256 (Common.GetEncryptedStream) with a 256-bit PBKDF2-derived key.
-                 * Omitted here for didactic simplicity over a trusted LAN.
-                 * =========================================================================
-                 */
-
-                byte[] bytes = packet.ToBytes();
-                lock (_stream)
-                {
-                    _stream.Write(bytes, 0, bytes.Length);
-                    _stream.Flush();
-                }
-            }
-            catch (Exception ex)
-            {
-                Log("[NETWORK ERROR] Failed to send packet: " + ex.Message);
-            }
+            _sendQueue.Enqueue(packet);
+            _sendSignal.Set();
         }
 
         private void CloseActiveConnection()
@@ -348,11 +421,16 @@ namespace SimpleRemoteKVM
                 try { _client.Close(); } catch { }
                 _client = null;
             }
+
+            DATA discarded;
+            while (_sendQueue.TryDequeue(out discarded)) { }
+            _sendSignal.Set();
         }
 
         public void Stop()
         {
             _isRunning = false;
+            _sendSignal.Set();
             CloseActiveConnection();
 
             if (_listener != null)

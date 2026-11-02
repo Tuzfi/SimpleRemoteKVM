@@ -9,23 +9,24 @@ namespace SimpleRemoteKVM
     /// <summary>
     /// Interface Gráfica P2P Mútua e Simétrica do SimpleRemoteKVM.
     /// Ambos os PCs iniciam como nós P2P equivalentes:
-    /// - Ambos escutam conexões automaticamente.
+    /// - Escutam conexões automaticamente na porta 15200.
     /// - Qualquer um pode conectar ao outro.
     /// - O controle de mouse e teclado é mútuo e bidirecional em tempo real.
+    /// - Transição automática de monitor pela borda da tela estilo Mouse without Borders.
     /// </summary>
     public class MainForm : Form
     {
-        // Core KVM Components
+        // Componentes Centrais KVM
         private InputHookManager _hookManager;
         private InputInjector _injector;
         private NetworkPeer _peer;
 
-        // Statistics
+        // Telemetria
         private long _packetsSent = 0;
         private long _packetsReceived = 0;
         private System.Windows.Forms.Timer _statsTimer;
 
-        // UI Theme Colors
+        // Cores do Tema Moderno Dark
         private readonly Color ClrBackground = Color.FromArgb(18, 22, 31);
         private readonly Color ClrCard = Color.FromArgb(28, 34, 48);
         private readonly Color ClrCardBorder = Color.FromArgb(45, 55, 75);
@@ -37,11 +38,11 @@ namespace SimpleRemoteKVM
         private readonly Color ClrAccentRed = Color.FromArgb(239, 68, 68);
         private readonly Color ClrCyan = Color.FromArgb(6, 182, 212);
 
-        // Header controls
+        // Header
         private Label _lblTitle;
         private Label _lblLocalIpBadge;
 
-        // Peer Connection controls
+        // Conexão P2P
         private Label _lblRemoteIp;
         private TextBox _txtRemoteIp;
         private Label _lblSubnetHint;
@@ -50,21 +51,26 @@ namespace SimpleRemoteKVM
         private Button _btnConnect;
         private Button _btnDisconnect;
 
-        // Status & Control Banner controls
+        // Configuração de Monitores (Estilo Mouse without Borders)
+        private ComboBox _cmbMonitorPosition;
+        private CheckBox _chkEdgeSwitch;
+        private Label _lblDiagram;
+        private Label _lblResolutionInfo;
+
+        // Status & Controle
         private Panel _pnlControlBanner;
         private Label _lblStatusTitle;
-        private Label _lblStatusDetail;
         private Label _lblControlMode;
         private Label _lblControlHint;
         private Button _btnToggleControl;
         private ComboBox _cmbHotkey;
 
-        // Stats controls
+        // Telemetria
         private Label _lblStatsSent;
         private Label _lblStatsReceived;
         private Label _lblStatsState;
 
-        // Log controls
+        // Log
         private TextBox _txtLog;
         private Button _btnClearLog;
         private CheckBox _chkAutoScroll;
@@ -91,13 +97,14 @@ namespace SimpleRemoteKVM
             _hookManager = new InputHookManager(InputHookManager.DEFAULT_TOGGLE_VK);
             _peer = new NetworkPeer();
 
-            // Wire peer events
+            // Wire eventos do peer de rede
             _peer.OnLog += msg => AppendLog(msg);
 
             _peer.OnConnected += endpoint =>
             {
                 SafeInvoke(() =>
                 {
+                    _hookManager.IsConnected = true;
                     UpdateConnectionState(true, "Conectado em modo P2P com: " + endpoint);
                     _btnConnect.Enabled = false;
                     _btnDisconnect.Enabled = true;
@@ -111,6 +118,7 @@ namespace SimpleRemoteKVM
             {
                 SafeInvoke(() =>
                 {
+                    _hookManager.IsConnected = false;
                     UpdateConnectionState(false, "Desconectado (" + reason + ")");
                     _btnConnect.Enabled = true;
                     _btnDisconnect.Enabled = false;
@@ -122,7 +130,21 @@ namespace SimpleRemoteKVM
                 });
             };
 
-            // Incoming packets
+            // Troca de resolução remota (handshake)
+            _peer.OnRemoteResolutionReceived += (rw, rh) =>
+            {
+                SafeInvoke(() =>
+                {
+                    _hookManager.RemoteScreenWidth = rw;
+                    _hookManager.RemoteScreenHeight = rh;
+                    Rectangle localBounds = Screen.PrimaryScreen.Bounds;
+                    _lblResolutionInfo.Text = string.Format("Resolução: Local ({0}x{1})  |  Remota ({2}x{3})  [Sincronizada]",
+                        localBounds.Width, localBounds.Height, rw, rh);
+                    AppendLog(string.Format("[MONITOR] Resolução do outro PC identificada: {0}x{1}", rw, rh));
+                });
+            };
+
+            // Pacotes recebidos da rede
             _peer.OnDataReceived += packet =>
             {
                 System.Threading.Interlocked.Increment(ref _packetsReceived);
@@ -139,19 +161,19 @@ namespace SimpleRemoteKVM
                 }
                 else
                 {
-                    // Eventos normais de mouse/teclado para injeção
+                    // Eventos normais de mouse/teclado para injeção imediata
                     _injector.Inject(packet);
                 }
             };
 
-            // Outgoing packets from local hooks
+            // Pacotes locais originados dos ganchos de baixo nível
             _hookManager.OnDataToSend += packet =>
             {
                 System.Threading.Interlocked.Increment(ref _packetsSent);
                 _peer.SendPacket(packet);
             };
 
-            // Local user pressed Toggle Key (ScrollLock)
+            // Mudança de status de controle (Local / Remoto)
             _hookManager.OnControlModeChanged += isRemote =>
             {
                 SafeInvoke(() =>
@@ -160,7 +182,7 @@ namespace SimpleRemoteKVM
                 });
             };
 
-            // Remote control status changed
+            // Notificação de quando está sendo controlado
             _hookManager.OnRemoteControlledChanged += isRemoteControlled =>
             {
                 SafeInvoke(() =>
@@ -212,8 +234,8 @@ namespace SimpleRemoteKVM
             }
 
             this.Text = "SimpleRemoteKVM — Controle Mútuo de Mouse e Teclado LAN (P2P)";
-            this.Size = new Size(740, 700);
-            this.MinimumSize = new Size(700, 640);
+            this.Size = new Size(760, 780);
+            this.MinimumSize = new Size(720, 700);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = ClrBackground;
             this.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
@@ -239,7 +261,7 @@ namespace SimpleRemoteKVM
 
             Label lblSubtitle = new Label
             {
-                Text = "Arquitetura P2P Simétrica — Ambos os PCs podem controlar e ser controlados",
+                Text = "Arquitetura P2P & Transição Automática de Telas (Mouse without Borders)",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Regular),
                 ForeColor = ClrTextSecondary,
                 AutoSize = true,
@@ -262,16 +284,18 @@ namespace SimpleRemoteKVM
             pnlHeader.Controls.Add(lblSubtitle);
             pnlHeader.Controls.Add(_lblLocalIpBadge);
 
-            // MAIN CONTAINER WITH PADDING
+            // MAIN CONTAINER COM SCROLL
             Panel pnlBody = new Panel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(20, 15, 20, 15),
+                Padding = new Padding(20, 12, 20, 12),
                 AutoScroll = true
             };
 
-            // 2. MUTUAL CONNECTION CARD
-            Panel pnlConnectionCard = CreateCardPanel(130);
+            // -------------------------------------------------------------
+            // CARD 1: CONEXÃO MÚTUA P2P
+            // -------------------------------------------------------------
+            Panel pnlConnectionCard = CreateCardPanel(115);
             pnlConnectionCard.Dock = DockStyle.Top;
 
             Label lblCard1Title = new Label
@@ -279,23 +303,23 @@ namespace SimpleRemoteKVM
                 Text = "1. Conexão Mútua P2P com o Outro Computador",
                 Font = new Font("Segoe UI Semibold", 10.5f, FontStyle.Bold),
                 ForeColor = ClrTextPrimary,
-                Location = new Point(15, 12),
+                Location = new Point(15, 10),
                 AutoSize = true
             };
 
             Label lblCard1Desc = new Label
             {
-                Text = "Ambos os PCs são iguais: basta que QUALQUER UM dos dois digite o IP do outro e clique em Conectar.",
+                Text = "Basta que QUALQUER UM dos dois computadores informe o IP do outro e clique em Conectar.",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Italic),
                 ForeColor = ClrTextSecondary,
-                Location = new Point(17, 34),
+                Location = new Point(17, 32),
                 AutoSize = true
             };
 
             _lblRemoteIp = new Label
             {
                 Text = "IP do Outro PC:",
-                Location = new Point(18, 68),
+                Location = new Point(18, 65),
                 AutoSize = true,
                 ForeColor = ClrTextSecondary
             };
@@ -303,7 +327,7 @@ namespace SimpleRemoteKVM
             _txtRemoteIp = new TextBox
             {
                 Text = _detectedSubnetBase,
-                Location = new Point(125, 65),
+                Location = new Point(125, 62),
                 Width = 145,
                 BackColor = Color.FromArgb(38, 46, 62),
                 ForeColor = ClrTextPrimary,
@@ -312,17 +336,17 @@ namespace SimpleRemoteKVM
 
             _lblSubnetHint = new Label
             {
-                Text = "(Na mesma rede: " + _detectedSubnetBase + "*)",
+                Text = "(Sub-rede: " + _detectedSubnetBase + "*)",
                 Font = new Font("Segoe UI", 7.5f, FontStyle.Italic),
                 ForeColor = ClrCyan,
-                Location = new Point(125, 90),
+                Location = new Point(125, 87),
                 AutoSize = true
             };
 
             _lblPort = new Label
             {
                 Text = "Porta:",
-                Location = new Point(285, 68),
+                Location = new Point(285, 65),
                 AutoSize = true,
                 ForeColor = ClrTextSecondary
             };
@@ -330,15 +354,15 @@ namespace SimpleRemoteKVM
             _txtPort = new TextBox
             {
                 Text = NetworkPeer.DEFAULT_PORT.ToString(),
-                Location = new Point(330, 65),
+                Location = new Point(330, 62),
                 Width = 65,
                 BackColor = Color.FromArgb(38, 46, 62),
                 ForeColor = ClrTextPrimary,
                 BorderStyle = BorderStyle.FixedSingle
             };
 
-            _btnConnect = CreateStyledButton("Conectar ao PC", ClrAccentBlue, 140, 32);
-            _btnConnect.Location = new Point(415, 61);
+            _btnConnect = CreateStyledButton("Conectar ao PC", ClrAccentBlue, 135, 30);
+            _btnConnect.Location = new Point(410, 58);
             _btnConnect.Click += (s, e) =>
             {
                 int port;
@@ -350,18 +374,23 @@ namespace SimpleRemoteKVM
                 ConnectToPeer(_txtRemoteIp.Text.Trim(), port);
             };
 
-            _btnDisconnect = CreateStyledButton("Desconectar", ClrAccentRed, 110, 32);
-            _btnDisconnect.Location = new Point(565, 61);
+            _btnDisconnect = CreateStyledButton("Desconectar", ClrAccentRed, 110, 30);
+            _btnDisconnect.Location = new Point(555, 58);
             _btnDisconnect.Enabled = false;
             _btnDisconnect.Click += (s, e) =>
             {
                 _peer.Stop();
+                _hookManager.IsConnected = false;
+                UpdateConnectionState(false, "Desconectado pelo usuário");
                 _btnConnect.Enabled = true;
                 _btnDisconnect.Enabled = false;
                 _txtRemoteIp.Enabled = true;
                 _txtPort.Enabled = true;
-                UpdateConnectionState(false, "Desconectado pelo usuário");
-                AppendLog("[P2P] Conexão finalizada pelo usuário.");
+                _hookManager.SetBeingControlledByRemote(false);
+                UpdateControlBanner(false, false);
+                AppendLog("[VÍNCULO P2P] Desconectado manualmente.");
+                // Reinicia o servidor para continuar ouvindo
+                try { _peer.StartServer(int.Parse(_txtPort.Text)); } catch { }
             };
 
             pnlConnectionCard.Controls.Add(lblCard1Title);
@@ -374,219 +403,285 @@ namespace SimpleRemoteKVM
             pnlConnectionCard.Controls.Add(_btnConnect);
             pnlConnectionCard.Controls.Add(_btnDisconnect);
 
-            // SPACER 1
-            Panel pnlSpacer1 = new Panel { Dock = DockStyle.Top, Height = 12 };
+            // -------------------------------------------------------------
+            // CARD 2: POSIÇÃO DOS MONITORES & TRANSIÇÃO AUTOMÁTICA
+            // -------------------------------------------------------------
+            Panel pnlMonitorCard = CreateCardPanel(145);
+            pnlMonitorCard.Dock = DockStyle.Top;
 
-            // 3. MUTUAL CONTROL BANNER (Hero Card)
-            _pnlControlBanner = CreateCardPanel(160);
-            _pnlControlBanner.Dock = DockStyle.Top;
-            _pnlControlBanner.BackColor = Color.FromArgb(24, 30, 42);
-
-            _lblStatusTitle = new Label
+            Label lblCard2Title = new Label
             {
-                Text = "ESTADO DO VÍNCULO P2P",
-                Font = new Font("Segoe UI Semibold", 8.5f, FontStyle.Bold),
-                ForeColor = ClrTextSecondary,
-                Location = new Point(18, 14),
+                Text = "2. Posição do Segundo Computador / Monitor (Estilo Mouse without Borders)",
+                Font = new Font("Segoe UI Semibold", 10.5f, FontStyle.Bold),
+                ForeColor = ClrTextPrimary,
+                Location = new Point(15, 10),
                 AutoSize = true
             };
 
-            _lblStatusDetail = new Label
+            Label lblPos = new Label
             {
-                Text = "Aguardando conexão mútua (pronto para conectar ou receber)...",
-                Font = new Font("Segoe UI Semibold", 10.5f, FontStyle.Bold),
-                ForeColor = ClrAccentAmber,
-                Location = new Point(18, 33),
+                Text = "Posição do PC Remoto:",
+                Location = new Point(18, 40),
+                AutoSize = true,
+                ForeColor = ClrTextSecondary
+            };
+
+            _cmbMonitorPosition = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Location = new Point(175, 37),
+                Width = 285,
+                BackColor = Color.FromArgb(38, 46, 62),
+                ForeColor = ClrTextPrimary,
+                FlatStyle = FlatStyle.Flat
+            };
+            _cmbMonitorPosition.Items.Add("À Direita  (Este PC à Esquerda ──▶ PC Remoto à Direita)");
+            _cmbMonitorPosition.Items.Add("À Esquerda (PC Remoto à Esquerda ◀── Este PC à Direita)");
+            _cmbMonitorPosition.Items.Add("Acima      (PC Remoto Acima ▲ Este PC Abaixo)");
+            _cmbMonitorPosition.Items.Add("Abaixo     (Este PC Acima ▼ PC Remoto Abaixo)");
+            _cmbMonitorPosition.SelectedIndex = 0; // Padrão: À Direita
+
+            _cmbMonitorPosition.SelectedIndexChanged += (s, e) =>
+            {
+                _hookManager.MonitorPosition = (RemoteMonitorPosition)_cmbMonitorPosition.SelectedIndex;
+                UpdateDiagram();
+            };
+
+            _chkEdgeSwitch = new CheckBox
+            {
+                Text = "Transição Automática de Tela pela Borda (Mudar de PC ao empurrar o mouse contra o canto)",
+                Checked = true,
+                Location = new Point(20, 70),
+                AutoSize = true,
+                ForeColor = ClrAccentGreen,
+                Font = new Font("Segoe UI Semibold", 9.0f, FontStyle.Bold)
+            };
+            _chkEdgeSwitch.CheckedChanged += (s, e) =>
+            {
+                _hookManager.EnableEdgeSwitching = _chkEdgeSwitch.Checked;
+            };
+
+            _lblDiagram = new Label
+            {
+                Text = "[ 💻 Este PC ] ──────▶ [ 🖥️ PC Remoto ]",
+                Font = new Font("Segoe UI Semibold", 10.0f, FontStyle.Bold),
+                ForeColor = ClrCyan,
+                BackColor = Color.FromArgb(20, 25, 36),
+                Padding = new Padding(12, 6, 12, 6),
+                AutoSize = true,
+                Location = new Point(20, 98)
+            };
+
+            Rectangle curScreen = Screen.PrimaryScreen.Bounds;
+            _lblResolutionInfo = new Label
+            {
+                Text = string.Format("Resolução: Local ({0}x{1})  |  Remota (Aguardando sincronização)", curScreen.Width, curScreen.Height),
+                Font = new Font("Segoe UI", 8.0f, FontStyle.Italic),
+                ForeColor = ClrTextSecondary,
+                Location = new Point(340, 104),
                 AutoSize = true
+            };
+
+            pnlMonitorCard.Controls.Add(lblCard2Title);
+            pnlMonitorCard.Controls.Add(lblPos);
+            pnlMonitorCard.Controls.Add(_cmbMonitorPosition);
+            pnlMonitorCard.Controls.Add(_chkEdgeSwitch);
+            pnlMonitorCard.Controls.Add(_lblDiagram);
+            pnlMonitorCard.Controls.Add(_lblResolutionInfo);
+
+            // -------------------------------------------------------------
+            // CARD 3: STATUS DA CONEXÃO & BANNER DE CONTROLE
+            // -------------------------------------------------------------
+            Panel pnlControlCard = CreateCardPanel(135);
+            pnlControlCard.Dock = DockStyle.Top;
+
+            Label lblCard3Title = new Label
+            {
+                Text = "3. Status da Conexão e Alternância de Controle",
+                Font = new Font("Segoe UI Semibold", 10.5f, FontStyle.Bold),
+                ForeColor = ClrTextPrimary,
+                Location = new Point(15, 10),
+                AutoSize = true
+            };
+
+            _lblStatusTitle = new Label
+            {
+                Text = "Aguardando conexão...",
+                Font = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold),
+                ForeColor = ClrAccentAmber,
+                Location = new Point(18, 36),
+                AutoSize = true
+            };
+
+            // Banner dinâmico
+            _pnlControlBanner = new Panel
+            {
+                Location = new Point(18, 62),
+                Width = 430,
+                Height = 60,
+                BackColor = Color.FromArgb(35, 45, 65),
+                BorderStyle = BorderStyle.FixedSingle
             };
 
             _lblControlMode = new Label
             {
-                Text = "MODO LOCAL ATIVO — Você está no controle deste computador",
-                Font = new Font("Segoe UI", 11f, FontStyle.Bold),
+                Text = "💻 CONTROLANDO PC LOCAL",
+                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
                 ForeColor = ClrAccentGreen,
-                Location = new Point(18, 66),
+                Location = new Point(12, 8),
                 AutoSize = true
             };
 
             _lblControlHint = new Label
             {
-                Text = "Pressione [ScrollLock] a qualquer momento para alternar o controle entre os computadores.",
-                Font = new Font("Segoe UI", 8.5f, FontStyle.Regular),
+                Text = "Mova o mouse até a borda da tela ou pressione ScrollLock para alternar.",
+                Font = new Font("Segoe UI", 8.0f, FontStyle.Regular),
                 ForeColor = ClrTextSecondary,
-                Location = new Point(20, 92),
+                Location = new Point(14, 34),
                 AutoSize = true
             };
 
-            _btnToggleControl = CreateStyledButton("Alternar Controle Mútuo [ScrollLock]", ClrCyan, 290, 36);
-            _btnToggleControl.Location = new Point(20, 114);
-            _btnToggleControl.ForeColor = Color.Black;
-            _btnToggleControl.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            _pnlControlBanner.Controls.Add(_lblControlMode);
+            _pnlControlBanner.Controls.Add(_lblControlHint);
+
+            _btnToggleControl = CreateStyledButton("Alternar Controle", ClrAccentBlue, 140, 38);
+            _btnToggleControl.Location = new Point(465, 62);
             _btnToggleControl.Click += (s, e) =>
             {
                 _hookManager.ToggleRemoteMode();
             };
 
-            Label lblHotkeyHint = new Label
+            Label lblHotkey = new Label
             {
                 Text = "Tecla de Atalho:",
-                Location = new Point(330, 122),
+                Location = new Point(465, 104),
                 AutoSize = true,
-                ForeColor = ClrTextSecondary
+                ForeColor = ClrTextSecondary,
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Regular)
             };
 
             _cmbHotkey = new ComboBox
             {
-                Location = new Point(430, 119),
-                Width = 140,
                 DropDownStyle = ComboBoxStyle.DropDownList,
+                Location = new Point(565, 102),
+                Width = 100,
                 BackColor = Color.FromArgb(38, 46, 62),
                 ForeColor = ClrTextPrimary,
                 FlatStyle = FlatStyle.Flat
             };
-            _cmbHotkey.Items.Add("ScrollLock (Padrão)");
+            _cmbHotkey.Items.Add("ScrollLock");
             _cmbHotkey.Items.Add("F12");
-            _cmbHotkey.Items.Add("Pause / Break");
-            _cmbHotkey.Items.Add("F10");
+            _cmbHotkey.Items.Add("CapsLock");
+            _cmbHotkey.Items.Add("Pause");
             _cmbHotkey.SelectedIndex = 0;
             _cmbHotkey.SelectedIndexChanged += (s, e) =>
             {
                 switch (_cmbHotkey.SelectedIndex)
                 {
-                    case 0: _hookManager.ToggleVirtualKey = 0x91; break; // VK_SCROLL
-                    case 1: _hookManager.ToggleVirtualKey = 0x7B; break; // VK_F12
-                    case 2: _hookManager.ToggleVirtualKey = 0x13; break; // VK_PAUSE
-                    case 3: _hookManager.ToggleVirtualKey = 0x79; break; // VK_F10
+                    case 0: _hookManager.ToggleVirtualKey = 0x91; break; // ScrollLock
+                    case 1: _hookManager.ToggleVirtualKey = 0x7B; break; // F12
+                    case 2: _hookManager.ToggleVirtualKey = 0x14; break; // CapsLock
+                    case 3: _hookManager.ToggleVirtualKey = 0x13; break; // Pause
                 }
-                AppendLog("[HOTKEY] Tecla de alternância configurada para: " + _cmbHotkey.SelectedItem);
             };
 
-            _pnlControlBanner.Controls.Add(_lblStatusTitle);
-            _pnlControlBanner.Controls.Add(_lblStatusDetail);
-            _pnlControlBanner.Controls.Add(_lblControlMode);
-            _pnlControlBanner.Controls.Add(_lblControlHint);
-            _pnlControlBanner.Controls.Add(_btnToggleControl);
-            _pnlControlBanner.Controls.Add(lblHotkeyHint);
-            _pnlControlBanner.Controls.Add(_cmbHotkey);
+            pnlControlCard.Controls.Add(lblCard3Title);
+            pnlControlCard.Controls.Add(_lblStatusTitle);
+            pnlControlCard.Controls.Add(_pnlControlBanner);
+            pnlControlCard.Controls.Add(_btnToggleControl);
+            pnlControlCard.Controls.Add(lblHotkey);
+            pnlControlCard.Controls.Add(_cmbHotkey);
 
-            // SPACER 2
-            Panel pnlSpacer2 = new Panel { Dock = DockStyle.Top, Height = 12 };
+            // -------------------------------------------------------------
+            // CARD 4: TELEMETRIA & LOG DE EVENTOS EM TEMPO REAL
+            // -------------------------------------------------------------
+            Panel pnlLogCard = CreateCardPanel(230);
+            pnlLogCard.Dock = DockStyle.Fill;
 
-            // 4. TELEMETRY STATUS BAR
-            Panel pnlTelemetry = new Panel
+            Label lblLogTitle = new Label
             {
-                Dock = DockStyle.Top,
-                Height = 28,
-                BackColor = Color.Transparent
+                Text = "4. Registro de Eventos e Telemetria em Tempo Real",
+                Font = new Font("Segoe UI Semibold", 10.5f, FontStyle.Bold),
+                ForeColor = ClrTextPrimary,
+                Location = new Point(15, 10),
+                AutoSize = true
             };
 
             _lblStatsSent = new Label
             {
                 Text = "Enviados: 0 pkts",
+                Location = new Point(18, 38),
+                AutoSize = true,
                 ForeColor = ClrTextSecondary,
-                Font = new Font("Segoe UI", 8.5f),
-                Location = new Point(5, 5),
-                AutoSize = true
+                Font = new Font("Segoe UI Semibold", 9.0f, FontStyle.Bold)
             };
 
             _lblStatsReceived = new Label
             {
                 Text = "Recebidos: 0 pkts",
+                Location = new Point(170, 38),
+                AutoSize = true,
                 ForeColor = ClrTextSecondary,
-                Font = new Font("Segoe UI", 8.5f),
-                Location = new Point(170, 5),
-                AutoSize = true
+                Font = new Font("Segoe UI Semibold", 9.0f, FontStyle.Bold)
             };
 
             _lblStatsState = new Label
             {
-                Text = "Socket P2P Bidirecional  |  NoDelay=True  |  Buffer 1 MB",
-                ForeColor = ClrTextSecondary,
-                Font = new Font("Segoe UI", 8.5f),
-                Location = new Point(340, 5),
-                AutoSize = true
-            };
-
-            pnlTelemetry.Controls.Add(_lblStatsSent);
-            pnlTelemetry.Controls.Add(_lblStatsReceived);
-            pnlTelemetry.Controls.Add(_lblStatsState);
-
-            // 5. LIVE LOG CARD
-            Panel pnlLogCard = CreateCardPanel(200);
-            pnlLogCard.Dock = DockStyle.Fill;
-
-            Panel pnlLogHeader = new Panel
-            {
-                Dock = DockStyle.Top,
-                Height = 35
-            };
-
-            Label lblLogTitle = new Label
-            {
-                Text = "Registro de Eventos e Protocolo em Tempo Real",
-                Font = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold),
-                ForeColor = ClrTextPrimary,
-                Location = new Point(12, 8),
-                AutoSize = true
+                Text = "Fila Assíncrona Ativa  |  Latência < 1ms  |  NoDelay = True  |  1 MB Buffer",
+                Location = new Point(320, 38),
+                AutoSize = true,
+                ForeColor = ClrCyan,
+                Font = new Font("Segoe UI", 8.0f, FontStyle.Italic)
             };
 
             _chkAutoScroll = new CheckBox
             {
                 Text = "Rolar auto",
                 Checked = true,
-                ForeColor = ClrTextSecondary,
-                Location = new Point(pnlLogCard.Width - 190, 6),
+                Location = new Point(515, 10),
                 AutoSize = true,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
-            };
-
-            _btnClearLog = new Button
-            {
-                Text = "Limpar",
-                Width = 70,
-                Height = 25,
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(40, 48, 66),
                 ForeColor = ClrTextSecondary,
-                Location = new Point(pnlLogCard.Width - 90, 4),
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Cursor = Cursors.Hand
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Regular)
             };
-            _btnClearLog.FlatAppearance.BorderSize = 0;
-            _btnClearLog.Click += (s, e) => _txtLog.Clear();
 
-            pnlLogHeader.Controls.Add(lblLogTitle);
-            pnlLogHeader.Controls.Add(_chkAutoScroll);
-            pnlLogHeader.Controls.Add(_btnClearLog);
+            _btnClearLog = CreateStyledButton("Limpar", Color.FromArgb(50, 60, 80), 70, 24);
+            _btnClearLog.Location = new Point(610, 8);
+            _btnClearLog.Click += (s, e) => _txtLog.Clear();
 
             _txtLog = new TextBox
             {
                 Multiline = true,
                 ReadOnly = true,
                 ScrollBars = ScrollBars.Vertical,
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(18, 22, 30),
-                ForeColor = Color.FromArgb(203, 213, 225),
-                Font = new Font("Consolas", 8.5f),
-                BorderStyle = BorderStyle.None
+                BackColor = Color.FromArgb(12, 15, 22),
+                ForeColor = Color.FromArgb(200, 215, 235),
+                Font = new Font("Consolas", 8.5f, FontStyle.Regular),
+                Location = new Point(18, 62),
+                Width = 660,
+                Height = 155,
+                BorderStyle = BorderStyle.None,
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
             };
 
-            Panel pnlLogTextWrapper = new Panel
-            {
-                Dock = DockStyle.Fill,
-                Padding = new Padding(10, 0, 10, 10)
-            };
-            pnlLogTextWrapper.Controls.Add(_txtLog);
+            pnlLogCard.Controls.Add(lblLogTitle);
+            pnlLogCard.Controls.Add(_lblStatsSent);
+            pnlLogCard.Controls.Add(_lblStatsReceived);
+            pnlLogCard.Controls.Add(_lblStatsState);
+            pnlLogCard.Controls.Add(_chkAutoScroll);
+            pnlLogCard.Controls.Add(_btnClearLog);
+            pnlLogCard.Controls.Add(_txtLog);
 
-            pnlLogCard.Controls.Add(pnlLogTextWrapper);
-            pnlLogCard.Controls.Add(pnlLogHeader);
+            // Organização vertical com espaçamento
+            Panel spacer1 = new Panel { Dock = DockStyle.Top, Height = 10, BackColor = Color.Transparent };
+            Panel spacer2 = new Panel { Dock = DockStyle.Top, Height = 10, BackColor = Color.Transparent };
+            Panel spacer3 = new Panel { Dock = DockStyle.Top, Height = 10, BackColor = Color.Transparent };
 
-            // Assemble Hierarchy
             pnlBody.Controls.Add(pnlLogCard);
-            pnlBody.Controls.Add(pnlTelemetry);
-            pnlBody.Controls.Add(pnlSpacer2);
-            pnlBody.Controls.Add(_pnlControlBanner);
-            pnlBody.Controls.Add(pnlSpacer1);
+            pnlBody.Controls.Add(spacer3);
+            pnlBody.Controls.Add(pnlControlCard);
+            pnlBody.Controls.Add(spacer2);
+            pnlBody.Controls.Add(pnlMonitorCard);
+            pnlBody.Controls.Add(spacer1);
             pnlBody.Controls.Add(pnlConnectionCard);
 
             this.Controls.Add(pnlBody);
@@ -594,10 +689,141 @@ namespace SimpleRemoteKVM
 
             this.FormClosing += (s, e) =>
             {
-                _statsTimer.Stop();
                 if (_hookManager != null) _hookManager.Dispose();
                 if (_peer != null) _peer.Dispose();
             };
+        }
+
+        private void UpdateDiagram()
+        {
+            switch (_hookManager.MonitorPosition)
+            {
+                case RemoteMonitorPosition.Right:
+                    _lblDiagram.Text = "[ 💻 Este PC ] ──────▶ [ 🖥️ PC Remoto ]";
+                    break;
+                case RemoteMonitorPosition.Left:
+                    _lblDiagram.Text = "[ 🖥️ PC Remoto ] ◀────── [ 💻 Este PC ]";
+                    break;
+                case RemoteMonitorPosition.Top:
+                    _lblDiagram.Text = "[ 🖥️ PC Remoto ]   ▲ (Acima)   [ 💻 Este PC ]";
+                    break;
+                case RemoteMonitorPosition.Bottom:
+                    _lblDiagram.Text = "[ 💻 Este PC ]   ▼ (Abaixo)   [ 🖥️ PC Remoto ]";
+                    break;
+            }
+        }
+
+        private void ConnectToPeer(string ip, int port)
+        {
+            if (string.IsNullOrEmpty(ip) || ip.Trim() == _detectedSubnetBase)
+            {
+                MessageBox.Show("Por favor, digite o endereço IP completo do outro computador na mesma rede Wi-Fi/LAN.", "IP Incompleto", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _txtRemoteIp.Focus();
+                return;
+            }
+
+            IPAddress parsed;
+            if (!IPAddress.TryParse(ip, out parsed))
+            {
+                MessageBox.Show(string.Format("O IP '{0}' é inválido. Digite um IP como 192.168.100.X.", ip), "IP Inválido", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _txtRemoteIp.Focus();
+                return;
+            }
+
+            _lblStatusTitle.Text = "Conectando ao PC " + ip + ":" + port + "...";
+            _lblStatusTitle.ForeColor = ClrCyan;
+
+            _peer.Connect(ip, port);
+        }
+
+        private void UpdateConnectionState(bool connected, string detail)
+        {
+            if (connected)
+            {
+                _lblStatusTitle.Text = "● CONECTADO EM MODO P2P MÚTUO";
+                _lblStatusTitle.ForeColor = ClrAccentGreen;
+            }
+            else
+            {
+                _lblStatusTitle.Text = "○ DESCONECTADO (" + detail + ")";
+                _lblStatusTitle.ForeColor = ClrAccentRed;
+            }
+        }
+
+        private void UpdateControlBanner(bool isRemoteControlling, bool isBeingControlled)
+        {
+            if (isBeingControlled)
+            {
+                _pnlControlBanner.BackColor = Color.FromArgb(60, 45, 20);
+                _lblControlMode.Text = "⚠️ SENDO CONTROLADO PELO OUTRO PC";
+                _lblControlMode.ForeColor = ClrAccentAmber;
+                _lblControlHint.Text = "O outro computador está utilizando seu mouse e teclado agora.";
+                _btnToggleControl.Text = "Retomar Controle";
+            }
+            else if (isRemoteControlling)
+            {
+                _pnlControlBanner.BackColor = Color.FromArgb(20, 50, 75);
+                _lblControlMode.Text = "🖥️ CONTROLANDO PC REMOTO";
+                _lblControlMode.ForeColor = ClrCyan;
+                _lblControlHint.Text = "Seu mouse e teclado estão operando o outro PC. Mova de volta pela borda ou aperte ScrollLock para sair.";
+                _btnToggleControl.Text = "Voltar ao PC Local";
+            }
+            else
+            {
+                _pnlControlBanner.BackColor = Color.FromArgb(25, 45, 35);
+                _lblControlMode.Text = "💻 CONTROLANDO PC LOCAL";
+                _lblControlMode.ForeColor = ClrAccentGreen;
+                _lblControlHint.Text = "Mova o mouse até a borda da tela ou pressione ScrollLock para alternar.";
+                _btnToggleControl.Text = "Alternar Controle";
+            }
+        }
+
+        private void AppendLog(string message)
+        {
+            SafeInvoke(() =>
+            {
+                string timestamp = DateTime.Now.ToString("HH:mm:ss");
+                string logLine = string.Format("[{0}] {1}\r\n", timestamp, message);
+                _txtLog.AppendText(logLine);
+
+                if (_chkAutoScroll.Checked)
+                {
+                    _txtLog.SelectionStart = _txtLog.TextLength;
+                    _txtLog.ScrollToCaret();
+                }
+            });
+        }
+
+        private string GetLocalIpAddress()
+        {
+            try
+            {
+                using (Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, 0))
+                {
+                    socket.Connect("8.8.8.8", 65530);
+                    IPEndPoint endPoint = socket.LocalEndPoint as IPEndPoint;
+                    if (endPoint != null)
+                    {
+                        return endPoint.Address.ToString();
+                    }
+                }
+            }
+            catch
+            {
+                try
+                {
+                    IPHostEntry host = Dns.GetHostEntry(Dns.GetHostName());
+                    foreach (IPAddress ip in host.AddressList)
+                    {
+                        if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
+                        {
+                            return ip.ToString();
+                        }
+                    }
+                }
+                catch { }
+            }
+            return "127.0.0.1";
         }
 
         private Panel CreateCardPanel(int height)
@@ -608,179 +834,49 @@ namespace SimpleRemoteKVM
                 BackColor = ClrCard,
                 Padding = new Padding(15)
             };
+
             pnl.Paint += (s, e) =>
             {
-                using (Pen pen = new Pen(ClrCardBorder, 1))
+                using (Pen borderPen = new Pen(ClrCardBorder, 1))
                 {
-                    e.Graphics.DrawRectangle(pen, 0, 0, pnl.Width - 1, pnl.Height - 1);
+                    e.Graphics.DrawRectangle(borderPen, 0, 0, pnl.Width - 1, pnl.Height - 1);
                 }
             };
-            pnl.Resize += (s, e) => pnl.Invalidate();
+
             return pnl;
         }
 
-        private Button CreateStyledButton(string text, Color bg, int width, int height)
+        private Button CreateStyledButton(string text, Color backColor, int width, int height)
         {
             Button btn = new Button
             {
                 Text = text,
                 Width = width,
                 Height = height,
-                BackColor = bg,
+                BackColor = backColor,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold),
+                Font = new Font("Segoe UI Semibold", 9.0f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             btn.FlatAppearance.BorderSize = 0;
             return btn;
         }
 
-        private void ConnectToPeer(string ip, int port)
+        private void SafeInvoke(Action action)
         {
-            if (string.IsNullOrEmpty(ip))
-            {
-                MessageBox.Show("Informe o IP do outro computador.", "IP Ausente", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (ip == _detectedLocalIp)
-            {
-                DialogResult dr = MessageBox.Show(
-                    "Você inseriu o IP deste próprio computador (" + _detectedLocalIp + ")!\r\n\r\nPara vincular dois computadores, você deve digitar o IP do OUTRO PC (mostrado no topo da tela do outro PC, ex: 192.168.100.X).\r\n\r\nDeseja tentar conectar mesmo assim?",
-                    "Atenção: IP Próprio",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question);
-
-                if (dr == DialogResult.No) return;
-            }
-
-            if (ip.EndsWith("."))
-            {
-                MessageBox.Show("Por favor, complete o IP com o número final do outro PC (exemplo: " + ip + "50).\r\n\r\nO IP exato pode ser visto no topo da janela no outro PC.", "IP Incompleto", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            try
-            {
-                _peer.Connect(ip, port);
-                _btnConnect.Enabled = false;
-                _btnDisconnect.Enabled = true;
-                _txtRemoteIp.Enabled = false;
-                _txtPort.Enabled = false;
-
-                _lblStatusDetail.Text = "Conectando ao peer em " + ip + ":" + port + "...";
-                _lblStatusDetail.ForeColor = ClrAccentAmber;
-                AppendLog("[P2P] Tentando estabelecer vínculo bidirecional com " + ip + ":" + port + "...");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Erro ao conectar: " + ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void UpdateConnectionState(bool isConnected, string detail)
-        {
-            _lblStatusDetail.Text = detail;
-            _lblStatusDetail.ForeColor = isConnected ? ClrAccentGreen : ClrAccentRed;
-            _btnDisconnect.Enabled = isConnected || !_btnConnect.Enabled;
-        }
-
-        private void UpdateControlBanner(bool isLocalSendingToRemote, bool isBeingControlledByRemote)
-        {
-            if (isLocalSendingToRemote)
-            {
-                // VOCÊ está controlando o outro PC
-                _pnlControlBanner.BackColor = Color.FromArgb(16, 44, 64);
-                _lblControlMode.Text = ">>> VOCÊ ESTÁ CONTROLANDO O OUTRO PC! <<<";
-                _lblControlMode.ForeColor = ClrCyan;
-                _lblControlHint.Text = "Seu mouse e teclado estão atuando no computador remoto. Pressione [ScrollLock] para retornar o controle a este PC.";
-                _btnToggleControl.Text = "Retornar ao PC Local [ScrollLock]";
-                _btnToggleControl.BackColor = ClrAccentAmber;
-                _btnToggleControl.ForeColor = Color.Black;
-                AppendLog(">>> [CONTROLE MÚTUO] Você assumiu o controle do PC remoto <<<");
-            }
-            else if (isBeingControlledByRemote)
-            {
-                // O OUTRO PC está controlando este PC
-                _pnlControlBanner.BackColor = Color.FromArgb(50, 35, 20);
-                _lblControlMode.Text = ">>> ESTE PC ESTÁ SENDO CONTROLADO REMOTAMENTE <<<";
-                _lblControlMode.ForeColor = ClrAccentAmber;
-                _lblControlHint.Text = "O outro PC está operando o mouse e teclado aqui. Você pode apertar [ScrollLock] a qualquer momento para retomar o controle.";
-                _btnToggleControl.Text = "Tomar Controle deste PC [ScrollLock]";
-                _btnToggleControl.BackColor = ClrAccentGreen;
-                _btnToggleControl.ForeColor = Color.Black;
-                AppendLog(">>> [CONTROLE MÚTUO] O outro PC assumiu o controle deste computador <<<");
-            }
-            else
-            {
-                // Modo Normal / Local
-                _pnlControlBanner.BackColor = Color.FromArgb(24, 30, 42);
-                _lblControlMode.Text = "MODO LOCAL ATIVO — Você está no controle deste computador";
-                _lblControlMode.ForeColor = ClrAccentGreen;
-                _lblControlHint.Text = "Seu mouse e teclado operam normalmente aqui. Pressione [ScrollLock] a qualquer momento para controlar o outro PC.";
-                _btnToggleControl.Text = "Controlar o Outro PC [ScrollLock]";
-                _btnToggleControl.BackColor = ClrCyan;
-                _btnToggleControl.ForeColor = Color.Black;
-                AppendLog("<<< [CONTROLE MÚTUO] Modo Local ativo <<<");
-            }
-        }
-
-        public void AppendLog(string message)
-        {
-            SafeInvoke(() =>
-            {
-                if (_txtLog == null || _txtLog.IsDisposed) return;
-                string line = string.Format("[{0:HH:mm:ss}] {1}\r\n", DateTime.Now, message);
-                _txtLog.AppendText(line);
-
-                if (_chkAutoScroll.Checked)
-                {
-                    _txtLog.SelectionStart = _txtLog.Text.Length;
-                    _txtLog.ScrollToCaret();
-                }
-            });
-        }
-
-        private void SafeInvoke(Action act)
-        {
-            if (this.IsDisposed || !this.IsHandleCreated) return;
             if (this.InvokeRequired)
             {
-                this.BeginInvoke(act);
+                try
+                {
+                    this.BeginInvoke(action);
+                }
+                catch (ObjectDisposedException) { }
             }
             else
             {
-                act();
+                action();
             }
-        }
-
-        private static string GetLocalIpAddress()
-        {
-            try
-            {
-                using (Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, 0))
-                {
-                    socket.Connect("8.8.8.8", 65530);
-                    IPEndPoint endPoint = socket.LocalEndPoint as IPEndPoint;
-                    if (endPoint != null) return endPoint.Address.ToString();
-                }
-            }
-            catch { }
-
-            try
-            {
-                foreach (IPAddress ip in Dns.GetHostEntry(Dns.GetHostName()).AddressList)
-                {
-                    if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
-                    {
-                        return ip.ToString();
-                    }
-                }
-            }
-            catch { }
-
-            return "127.0.0.1";
         }
     }
 }
