@@ -12,6 +12,16 @@ namespace SimpleRemoteKVM
         [STAThread]
         static void Main(string[] args)
         {
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) =>
+            {
+                System.IO.File.WriteAllText("thread_crash.log", e.Exception.ToString());
+            };
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                System.IO.File.WriteAllText("domain_crash.log", e.ExceptionObject.ToString());
+            };
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
@@ -44,7 +54,15 @@ namespace SimpleRemoteKVM
                 }
             }
 
-            Application.Run(new MainForm(autoMode, autoIp, autoPort));
+            try
+            {
+                Application.Run(new MainForm(autoMode, autoIp, autoPort));
+            }
+            catch (Exception ex)
+            {
+                System.IO.File.WriteAllText("crash.log", ex.ToString());
+                MessageBox.Show(ex.ToString(), "Crash Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
     }
 }
