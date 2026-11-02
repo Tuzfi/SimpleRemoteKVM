@@ -158,6 +158,11 @@ namespace SimpleRemoteKVM
                         _hookManager.SetBeingControlledByRemote(remoteIsControlling);
                         UpdateControlBanner(false, remoteIsControlling);
                     });
+
+                    if (remoteIsControlling && packet.Md.x > 0 && packet.Md.y > 0)
+                    {
+                        NativeMethods.SetCursorPos(packet.Md.x, packet.Md.y);
+                    }
                 }
                 else
                 {
